@@ -1,4 +1,4 @@
-r'''
+r"""
 
 
 [![Build Status](https://travis-ci.org/autonlab/DeepSurvivalMachines.svg?branch=master)](https://travis-ci.org/autonlab/DeepSurvivalMachines)
@@ -466,7 +466,7 @@ SOFTWARE.
 <br><br><br><br><br>
 <br><br><br><br><br>
 
-'''
+"""
 
 from .models.dsm import DeepSurvivalMachines
 from .models.dcm import DeepCoxMixtures

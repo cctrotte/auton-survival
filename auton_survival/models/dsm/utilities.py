@@ -38,181 +38,246 @@ import numpy as np
 import gc
 import logging
 
+import pandas as pd
+from auton_survival.metrics import survival_regression_metric
+
 
 def get_optimizer(model, lr):
 
-  if model.optimizer == 'Adam':
-    return torch.optim.Adam(model.parameters(), lr=lr)
-  elif model.optimizer == 'SGD':
-    return torch.optim.SGD(model.parameters(), lr=lr)
-  elif model.optimizer == 'RMSProp':
-    return torch.optim.RMSprop(model.parameters(), lr=lr)
-  else:
-    raise NotImplementedError('Optimizer '+model.optimizer+
-                              ' is not implemented')
+    if model.optimizer == "Adam":
+        return torch.optim.Adam(model.parameters(), lr=lr)
+    elif model.optimizer == "SGD":
+        return torch.optim.SGD(model.parameters(), lr=lr)
+    elif model.optimizer == "RMSProp":
+        return torch.optim.RMSprop(model.parameters(), lr=lr)
+    else:
+        raise NotImplementedError(
+            "Optimizer " + model.optimizer + " is not implemented"
+        )
 
-def pretrain_dsm(model, t_train, e_train, t_valid, e_valid,
-                 n_iter=10000, lr=1e-2, thres=1e-4):
 
-  premodel = DeepSurvivalMachinesTorch(1, 1,
-                                       dist=model.dist,
-                                       risks=model.risks,
-                                       optimizer=model.optimizer)
-  premodel.double()
+def pretrain_dsm(
+    model, t_train, e_train, t_valid, e_valid, n_iter=10000, lr=1e-2, thres=1e-4
+):
 
-  optimizer = get_optimizer(premodel, lr)
+    premodel = DeepSurvivalMachinesTorch(
+        1, 1, dist=model.dist, risks=model.risks, optimizer=model.optimizer
+    )
+    premodel.double()
 
-  oldcost = float('inf')
-  patience = 0
-  costs = []
-  for _ in tqdm(range(n_iter)):
+    optimizer = get_optimizer(premodel, lr)
 
-    optimizer.zero_grad()
-    loss = 0
-    for r in range(model.risks):
-      loss += unconditional_loss(premodel, t_train, e_train, str(r+1))
-    loss.backward()
-    optimizer.step()
+    oldcost = float("inf")
+    patience = 0
+    costs = []
+    for _ in tqdm(range(n_iter)):
 
-    valid_loss = 0
-    for r in range(model.risks):
-      valid_loss += unconditional_loss(premodel, t_valid, e_valid, str(r+1))
-    valid_loss = valid_loss.detach().cpu().numpy()
-    costs.append(valid_loss)
-    #print(valid_loss)
-    if np.abs(costs[-1] - oldcost) < thres:
-      patience += 1
-      if patience == 3:
-        break
-    oldcost = costs[-1]
+        optimizer.zero_grad()
+        loss = 0
+        for r in range(model.risks):
+            loss += unconditional_loss(premodel, t_train, e_train, str(r + 1))
+        loss.backward()
+        optimizer.step()
 
-  return premodel
+        valid_loss = 0
+        for r in range(model.risks):
+            valid_loss += unconditional_loss(premodel, t_valid, e_valid, str(r + 1))
+        valid_loss = valid_loss.detach().cpu().numpy()
+        costs.append(valid_loss)
+        # print(valid_loss)
+        if np.abs(costs[-1] - oldcost) < thres:
+            patience += 1
+            if patience == 3:
+                break
+        oldcost = costs[-1]
+
+    return premodel
+
 
 def _reshape_tensor_with_nans(data):
-  """Helper function to unroll padded RNN inputs."""
-  data = data.reshape(-1)
-  return data[~torch.isnan(data)]
+    """Helper function to unroll padded RNN inputs."""
+    data = data.reshape(-1)
+    return data[~torch.isnan(data)]
+
 
 def _get_padded_features(x):
-  """Helper function to pad variable length RNN inputs with nans."""
-  d = max([len(x_) for x_ in x])
-  padx = []
-  for i in range(len(x)):
-    pads = np.nan*np.ones((d - len(x[i]),) + x[i].shape[1:])
-    padx.append(np.concatenate([x[i], pads]))
-  return np.array(padx)
+    """Helper function to pad variable length RNN inputs with nans."""
+    d = max([len(x_) for x_ in x])
+    padx = []
+    for i in range(len(x)):
+        pads = np.nan * np.ones((d - len(x[i]),) + x[i].shape[1:])
+        padx.append(np.concatenate([x[i], pads]))
+    return np.array(padx)
+
 
 def _get_padded_targets(t):
-  """Helper function to pad variable length RNN inputs with nans."""
-  d = max([len(t_) for t_ in t])
-  padt = []
-  for i in range(len(t)):
-    pads = np.nan*np.ones(d - len(t[i]))
-    padt.append(np.concatenate([t[i], pads]))
-  return np.array(padt)[:, :, np.newaxis]
+    """Helper function to pad variable length RNN inputs with nans."""
+    d = max([len(t_) for t_ in t])
+    padt = []
+    for i in range(len(t)):
+        pads = np.nan * np.ones(d - len(t[i]))
+        padt.append(np.concatenate([t[i], pads]))
+    return np.array(padt)[:, :, np.newaxis]
 
-def train_dsm(model,
-              x_train, t_train, e_train,
-              x_valid, t_valid, e_valid,
-              n_iter=10000, lr=1e-3, elbo=True,
-              bs=100, random_seed=0):
-  """Function to train the torch instance of the model."""
 
-  torch.manual_seed(random_seed)
-  np.random.seed(random_seed)
+def train_dsm(
+    model_wrapper,
+    model,
+    x_train,
+    t_train,
+    e_train,
+    x_valid,
+    t_valid,
+    e_valid,
+    eval_times,
+    metric_name="nll",
+    pat_thresh=5,
+    n_iter=10000,
+    lr=1e-3,
+    elbo=True,
+    bs=100,
+    random_seed=0,
+):
+    """Function to train the torch instance of the model."""
 
-  logging.info('Pretraining the Underlying Distributions...')
-  # For padded variable length sequences we first unroll the input and
-  # mask out the padded nans.
-  t_train_ = _reshape_tensor_with_nans(t_train)
-  e_train_ = _reshape_tensor_with_nans(e_train)
-  t_valid_ = _reshape_tensor_with_nans(t_valid)
-  e_valid_ = _reshape_tensor_with_nans(e_valid)
+    torch.manual_seed(random_seed)
+    np.random.seed(random_seed)
 
-  premodel = pretrain_dsm(model,
-                          t_train_,
-                          e_train_,
-                          t_valid_,
-                          e_valid_,
-                          n_iter=10000,
-                          lr=1e-2,
-                          thres=1e-4)
+    logging.info("Pretraining the Underlying Distributions...")
+    # For padded variable length sequences we first unroll the input and
+    # mask out the padded nans.
+    t_train_ = _reshape_tensor_with_nans(t_train)
+    e_train_ = _reshape_tensor_with_nans(e_train)
+    t_valid_ = _reshape_tensor_with_nans(t_valid)
+    e_valid_ = _reshape_tensor_with_nans(e_valid)
 
-  for r in range(model.risks):
-    model.shape[str(r+1)].data.fill_(float(premodel.shape[str(r+1)]))
-    model.scale[str(r+1)].data.fill_(float(premodel.scale[str(r+1)]))
+    et_train = pd.DataFrame(
+        np.array(
+            [(e_train[i], t_train[i]) for i in range(len(e_train))],
+            dtype=[("event", bool), ("time", float)],
+        )
+    )
+    et_val = pd.DataFrame(
+        np.array(
+            [(e_valid[i], t_valid[i]) for i in range(len(e_valid))],
+            dtype=[("event", bool), ("time", float)],
+        )
+    )
 
-  model.double()
-  optimizer = get_optimizer(model, lr)
+    premodel = pretrain_dsm(
+        model, t_train_, e_train_, t_valid_, e_valid_, n_iter=10000, lr=1e-2, thres=1e-4
+    )
 
-  patience = 0
-  oldcost = float('inf')
-
-  nbatches = int(x_train.shape[0]/bs)+1
-
-  dics = []
-  costs = []
-  i = 0
-  for i in tqdm(range(n_iter)):
-
-    x_train, t_train, e_train = shuffle(x_train, t_train, e_train, random_state=i)
-
-    for j in range(nbatches):
-
-      xb = x_train[j*bs:(j+1)*bs]
-      tb = t_train[j*bs:(j+1)*bs]
-      eb = e_train[j*bs:(j+1)*bs]
-
-      if xb.shape[0] == 0:
-        continue
-
-      optimizer.zero_grad()
-      loss = 0
-      for r in range(model.risks):
-        loss += conditional_loss(model,
-                                 xb,
-                                 _reshape_tensor_with_nans(tb),
-                                 _reshape_tensor_with_nans(eb),
-                                 elbo=elbo,
-                                 risk=str(r+1))
-      #print ("Train Loss:", float(loss))
-      loss.backward()
-      optimizer.step()
-
-    valid_loss = 0
     for r in range(model.risks):
-      valid_loss += conditional_loss(model,
-                                     x_valid,
-                                     t_valid_,
-                                     e_valid_,
-                                     elbo=False,
-                                     risk=str(r+1))
+        model.shape[str(r + 1)].data.fill_(float(premodel.shape[str(r + 1)]))
+        model.scale[str(r + 1)].data.fill_(float(premodel.scale[str(r + 1)]))
 
-    valid_loss = valid_loss.detach().cpu().numpy()
-    costs.append(float(valid_loss))
-    dics.append(deepcopy(model.state_dict()))
+    model.double()
+    optimizer = get_optimizer(model, lr)
 
-    if costs[-1] >= oldcost:
-      if patience == 2:
-        minm = np.argmin(costs)
-        model.load_state_dict(dics[minm])
+    patience = 0
+    oldcost = float("inf")
 
-        del dics
-        gc.collect()
+    nbatches = int(x_train.shape[0] / bs) + 1
 
-        return model, i
-      else:
-        patience += 1
+    dics = []
+    metrics = {"nll": [], "brs": [], "ibs": [], "auc": [], "ctd": []}
+
+    i = 0
+    for i in tqdm(range(n_iter)):
+
+        x_train, t_train, e_train = shuffle(x_train, t_train, e_train, random_state=i)
+
+        for j in range(nbatches):
+
+            xb = x_train[j * bs : (j + 1) * bs]
+            tb = t_train[j * bs : (j + 1) * bs]
+            eb = e_train[j * bs : (j + 1) * bs]
+
+            if xb.shape[0] == 0:
+                continue
+
+            optimizer.zero_grad()
+            loss = 0
+            for r in range(model.risks):
+                loss += conditional_loss(
+                    model,
+                    xb,
+                    _reshape_tensor_with_nans(tb),
+                    _reshape_tensor_with_nans(eb),
+                    elbo=elbo,
+                    risk=str(r + 1),
+                )
+            # print ("Train Loss:", float(loss))
+            loss.backward()
+            optimizer.step()
+
+        valid_loss = 0
+        for r in range(model.risks):
+            valid_loss += conditional_loss(
+                model, x_valid, t_valid_, e_valid_, elbo=False, risk=str(r + 1)
+            )
+
+        valid_loss = valid_loss.detach().cpu().numpy()
+        metrics["nll"].append(float(valid_loss))
+        dics.append(deepcopy(model.state_dict()))
+        predictions_valid = model_wrapper.predict_survival_mine(
+            model.eval(), np.array(x_valid), eval_times
+        )
+        for m in ["brs", "ibs", "auc", "ctd"]:
+            metrics[m].append(
+                np.mean(
+                    survival_regression_metric(
+                        metric=m,
+                        outcomes_train=et_train,
+                        outcomes=et_val,
+                        predictions=predictions_valid,
+                        times=eval_times,
+                        random_seed=random_seed,
+                    )
+                )
+            )
+
+        if metric_name in ["nll", "brs", "ibs"]:
+            if metrics[metric_name][-1] >= oldcost:
+                if patience >= pat_thresh:
+                    minm = np.argmin(metrics[metric_name])
+                    model.load_state_dict(dics[minm])
+
+                    del dics
+                    gc.collect()
+
+                    return model, i, metrics
+                else:
+                    patience += 1
+            else:
+                patience = 0
+
+            oldcost = metrics[metric_name][-1]
+        else:
+            if metrics[metric_name][-1] <= oldcost:
+                if patience >= pat_thresh:
+                    minm = np.argmax(metrics[metric_name])
+                    model.load_state_dict(dics[minm])
+
+                    del dics
+                    gc.collect()
+
+                    return model, i, metrics
+                else:
+                    patience += 1
+            else:
+                patience = 0
+
+            oldcost = metrics[metric_name][-1]
+
+    if metric_name in ["nll", "brs", "ibs"]:
+        minm = np.argmin(metrics[metric_name])
     else:
-      patience = 0
+        minm = np.argmax(metrics[metric_name])
+    model.load_state_dict(dics[minm])
 
-    oldcost = costs[-1]
+    del dics
+    gc.collect()
 
-  minm = np.argmin(costs)
-  model.load_state_dict(dics[minm])
-
-  del dics
-  gc.collect()
-
-  return model, i
-  
+    return model, i, metrics
