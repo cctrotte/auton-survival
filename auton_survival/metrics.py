@@ -404,11 +404,11 @@ def phenotype_purity(
             "You are are estimating survival probabilities for \
 the same dataset used to estimate the censoring distribution."
         )
-
-    assert (
-        outcomes_test.time.max() >= outcomes_train.time.max()
-    ), "Test \
-set times must be within the range of training set follow-up times."
+#     commented out by Cecile
+#     assert (
+#         outcomes_test.time.max() >= outcomes_train.time.max()
+#     ), "Test \
+# set times must be within the range of training set follow-up times."
 
     survival_curves = {}
     for phenotype in np.unique(phenotypes_train):

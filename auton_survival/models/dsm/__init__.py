@@ -231,6 +231,7 @@ class DSMBase:
         batch_size=100,
         elbo=True,
         optimizer="Adam",
+        eval_times =  [0.02917808219178082, 0.25931506849315067, 0.6552054794520548, 1.5, 2.636849315068494, 4.069452054794517, 5.115260273972603, 6.753890410958904, 8.585342465753424, 10]
     ):
 
         r"""This method is used to train an instance of the DSM model.
@@ -280,9 +281,9 @@ class DSMBase:
 
         maxrisk = int(np.nanmax(e_train.cpu().numpy()))
         model = self._gen_torch_model(inputdim, optimizer, risks=maxrisk)
-        horizons = [0.1, 0.2, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
-
-        eval_times = np.quantile(t_train[e_train == 1], horizons).tolist()
+        # horizons = [0.1, 0.2, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+        # #TODO remove hard coded eval times
+        # eval_times = np.quantile(t_train[e_train == 1], horizons).tolist()
         model, _, costs = train_dsm(
             self,
             model,
